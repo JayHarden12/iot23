@@ -267,8 +267,14 @@ def sidebar():
     # URL-based dataset download (works with or without secrets)
     st.sidebar.markdown("---")
     st.sidebar.caption("Remote dataset (URL download)")
-    url_val = st.sidebar.text_input("Dataset URL", value=data_url or "")
-    dest_name_val = st.sidebar.text_input("Save as filename", value=dest_name or "IoT-23-features-sample.zip")
+    url_val = st.sidebar.text_input(
+        "Dataset URL",
+        value=data_url or "https://github.com/JayHarden12/iot23/releases/download/v1/uploaded_dataset_1758534317.zip",
+    )
+    dest_name_val = st.sidebar.text_input(
+        "Save as filename",
+        value=dest_name or "uploaded_dataset_1758534317.zip",
+    )
     sha_val = st.sidebar.text_input("SHA256 (optional)", value=expected_sha256 or "")
     dest_file = Path(dest_name_val or "IoT-23-features-sample.zip")
     if dest_file.exists():
