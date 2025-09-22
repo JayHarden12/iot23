@@ -152,6 +152,21 @@ def sidebar():
     default_path = "IoT-23.zip" if Path("IoT-23.zip").exists() else str(Path.cwd())
     dataset_path = st.sidebar.text_input("Dataset path (zip or folder)", value=default_path)
 
+    # Optional: upload a dataset zip directly (useful on Streamlit Cloud)
+    uploaded_zip = st.sidebar.file_uploader("Upload dataset zip (.zip)", type=["zip"], accept_multiple_files=False)
+    if uploaded_zip is not None:
+        # Persist uploaded zip to a stable, session-bound path so downstream code can read from disk
+        if "uploaded_zip_path" not in st.session_state:
+            st.session_state["uploaded_zip_path"] = str(Path.cwd() / f"uploaded_dataset_{int(time.time())}.zip")
+        save_path = Path(st.session_state["uploaded_zip_path"])
+        try:
+            with open(save_path, "wb") as f:
+                f.write(uploaded_zip.getbuffer())
+            dataset_path = str(save_path)
+            st.sidebar.success(f"Uploaded zip saved to: {save_path.name}")
+        except Exception as e:
+            st.sidebar.warning(f"Failed to save uploaded zip: {e}")
+
     task = st.sidebar.radio("Task", options=["Family (multiclass)", "Binary (malicious vs benign)"], index=0)
     task_key = "family" if task.startswith("Family") else "binary"
     include_benign = st.sidebar.checkbox("Include benign samples", value=(task_key == "binary"))
