@@ -269,9 +269,9 @@ def sidebar():
         st.sidebar.caption("Remote dataset (from secrets)")
         dest_file = Path(dest_name or "IoT-23-features-sample.zip")
         if dest_file.exists():
-            st.sidebar.info(f"Found downloaded dataset: {dest_file.name}")
-            if st.sidebar.button("Use downloaded dataset", use_container_width=True):
-                dataset_path = str(dest_file)
+            st.sidebar.success(f"Dataset ready: {dest_file.name}")
+            # Auto-use downloaded dataset to avoid confusing defaults on Cloud
+            dataset_path = str(dest_file)
         else:
             if st.sidebar.button("Download dataset from URL", use_container_width=True):
                 try:
