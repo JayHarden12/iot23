@@ -80,6 +80,58 @@ pip install -r requirements.txt
 5. **Launch the application:**
 ```bash
 streamlit run app.py
+
+## Create a Demo Sample Dataset
+
+If your IoT-23 dataset is very large (e.g., 9GB), create a small sample zip for demos and Streamlit Cloud:
+
+- Build a sample zip from a local IoT-23 source (zip or folder):
+  - `python scripts/make_sample.py --input "C:\\path\\to\\IoT-23.zip" --output IoT-23-sample.zip --max-files 3 --rows-per-file 20000`
+  - You can also pass a folder to `--input`.
+- Use the sample in the app:
+  - Place `IoT-23-sample.zip` in the project root and it will be the default path, or
+  - In the sidebar, use “Upload dataset zip (.zip)” and select `IoT-23-sample.zip`.
+
+Tips:
+- Keep the sample zip under ~200MB for Streamlit Cloud reliability.
+- The app still samples rows at runtime; you can raise/lower “Max files” and “Rows per file” in the sidebar to fit memory.
+
+## Feature-Engineered Demo Sample (Recommended)
+
+For a higher-quality demo, generate a curated, feature-engineered sample CSV and package it as a small zip:
+
+- Build features from your IoT-23 source (zip or folder):
+  - `python scripts/make_feature_sample.py --input "C:\\path\\to\\IoT-23.zip" --output IoT-23-features-sample.zip --max-files 8 --rows-per-file 60000 --per-class 800 --include-benign`
+- What it does:
+  - Reads a few labeled connection logs (CSV/TSV/log)
+  - Maps labels to PRD families (Benign, Mirai, Torii, Kenjiro, Trojan)
+  - Derives features (bytes/packet rates, ratios, log1p transforms, hour-of-day, etc.)
+  - Balances rows per class (best-effort) and writes one CSV inside the zip
+- Use it in the app:
+  - Place `IoT-23-features-sample.zip` in the project root. The app will auto-select it as the default dataset.
+  - Or upload it via the sidebar uploader.
+
+## Deploy: Download Dataset from GitHub Release (Secrets)
+
+If your demo zip is >100 MB, don’t commit it. Instead, upload it as a GitHub Release asset (public) and configure Streamlit Secrets to download it at runtime.
+
+1) Create a GitHub Release for your repo and upload your zip asset (e.g., `IoT-23-features-sample.zip`).
+2) Copy the public download URL (looks like: `https://github.com/<user>/<repo>/releases/download/<tag>/IoT-23-features-sample.zip`).
+3) In Streamlit Cloud, set Secrets (App settings → Advanced → Secrets):
+
+```
+DATA_URL = "https://github.com/<user>/<repo>/releases/download/<tag>/IoT-23-features-sample.zip"
+# Optional integrity check (sha256):
+# DATA_SHA256 = "<hex sha256>"
+# Optional custom filename to save as:
+# DATA_FILENAME = "IoT-23-features-sample.zip"
+```
+
+4) Deploy the app. In the sidebar, use “Download dataset from URL”. The app saves the file to the working directory and uses it as the dataset. It will persist for the lifetime of the app instance; after a restart you can download again.
+
+Notes:
+- Keep the Release asset as compact as possible (<200 MB recommended) for faster startup.
+- Private releases require auth; for simplicity use a public release. If you need private access, we can extend the app to use a token from secrets.
 ```
 
 6. **Open your browser:**
