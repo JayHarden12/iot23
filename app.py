@@ -15,7 +15,7 @@ from plotly.subplots import make_subplots
 import html
 
 from src.iot23.data_loader import list_candidate_tables, load_sample
-from src.iot23.modeling import TrainConfig, train_and_evaluate
+from src.iot23.modeling import TrainConfig, train_and_evaluate, keras as _keras
 
 
 def _sha256_file(path: Path, chunk: int = 1024 * 1024) -> str:
@@ -548,6 +548,11 @@ def main():
                     index=0,
                     help="Choose the machine learning algorithm"
                 )
+                # If TensorFlow/Keras is unavailable, prevent selecting DL models
+                if _keras is None:
+                    st.info("Deep learning models (CNN/LSTM) require TensorFlow. Not detected; using RandomForest.")
+                    if model_name != "RandomForest":
+                        model_name = "RandomForest"
             with col2:
                 test_size = st.slider(
                     "📊 Test Size", 
