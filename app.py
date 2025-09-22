@@ -12,6 +12,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import html
 
 from src.iot23.data_loader import list_candidate_tables, load_sample
 from src.iot23.modeling import TrainConfig, train_and_evaluate
@@ -383,7 +384,7 @@ def main():
             except Exception as e:
                 st.markdown(f"""
                 <div class="error-box">
-                    <strong>❌ Error loading data:</strong> {str(e)}
+                    <strong>❌ Error loading data:</strong> {html.escape(str(e))}
                 </div>
                 """, unsafe_allow_html=True)
                 progress_bar.empty()
@@ -651,9 +652,36 @@ def main():
                     
                     if last:
                         st.session_state["model_pipe"] = last[0]
-                        # Average metrics across repeats
-                        keys = sorted(set(k for m in all_metrics for k in m.keys()))
-                        avg = {k: float(np.mean([m.get(k, np.nan) for m in all_metrics if k in m])) for k in keys}
+                        # Average only numeric metrics across repeats; carry over informative strings
+                        numeric_keys = {
+                            "accuracy",
+                            "balanced_accuracy",
+                            "precision_weighted",
+                            "recall_weighted",
+                            "f1_weighted",
+                            "f1_macro",
+                            "mcc",
+                            "roc_auc_macro_ovr",
+                            "pr_auc_macro_ovr",
+                        }
+                        avg: Dict[str, float] = {}
+                        for k in numeric_keys:
+                            vals = []
+                            for m in all_metrics:
+                                v = m.get(k)
+                                if isinstance(v, (int, float, np.floating, np.integer)):
+                                    vals.append(float(v))
+                            if vals:
+                                avg[k] = float(np.nanmean(vals))
+                        # Preserve split strategy (random if any run used random)
+                        if any((m.get("split_strategy") == "random") for m in all_metrics):
+                            avg["split_strategy"] = "random"
+                        else:
+                            if last and isinstance(last[1], dict) and last[1].get("split_strategy"):
+                                avg["split_strategy"] = last[1]["split_strategy"]
+                        # Preserve dropped classes from last run if present
+                        if last and isinstance(last[1], dict) and last[1].get("dropped_classes"):
+                            avg["dropped_classes"] = last[1]["dropped_classes"]
                         st.session_state["metrics"] = avg
                         st.session_state["cm_df"] = last[2]
                         st.session_state["feat_imp"] = last[3]
@@ -675,7 +703,7 @@ def main():
                 except Exception as e:
                     st.markdown(f"""
                     <div class="error-box">
-                        <strong>❌ Training Failed:</strong> {str(e)}
+                        <strong>❌ Training Failed:</strong> {html.escape(str(e))}
                     </div>
                     """, unsafe_allow_html=True)
                     progress_bar.empty()
@@ -861,17 +889,47 @@ def main():
                     progress_bar.progress(25)
                     
                     df_pred = pd.read_csv(
-                        uploaded, 
-                        sep=None, 
-                        engine="python", 
-                        comment="#", 
-                        low_memory=False, 
-                        encoding_errors="ignore"
+                        uploaded,
+                        sep=None,
+                        engine="python",
+                        comment="#",
+                        na_values=["-", "N/A", "nan", "NaN", "?"],
+                        keep_default_na=True,
+                        encoding_errors="ignore",
                     )
                     
                     status_text.text("🔍 Processing data...")
                     progress_bar.progress(50)
                     
+                    # Align columns to training schema if available
+                    try:
+                        pre = pipe.named_steps.get("pre")
+                        input_cols = getattr(pre, "input_columns_", None)
+                        input_dtypes = getattr(pre, "input_dtypes_", None)
+                        if isinstance(input_cols, list):
+                            # Create any missing columns with sensible defaults
+                            if isinstance(input_dtypes, dict):
+                                for c in input_cols:
+                                    if c not in df_pred.columns:
+                                        dt = str(input_dtypes.get(c, "object")).lower()
+                                        if any(x in dt for x in ["float", "int", "number"]):
+                                            df_pred[c] = 0
+                                        else:
+                                            df_pred[c] = ""
+                                    else:
+                                        # Coerce existing columns to expected types
+                                        dt = str(input_dtypes.get(c, "object")).lower()
+                                        if any(x in dt for x in ["float", "int", "number"]):
+                                            df_pred[c] = pd.to_numeric(df_pred[c], errors="coerce")
+                                            df_pred[c] = df_pred[c].fillna(0)
+                                        else:
+                                            # Ensure string dtype for categoricals and fill missing
+                                            df_pred[c] = df_pred[c].astype(str).fillna("")
+                            # Ensure columns order includes all training columns first
+                            df_pred = df_pred.reindex(columns=list(dict.fromkeys(input_cols + list(df_pred.columns))))
+                    except Exception:
+                        pass
+
                     # Make predictions
                     preds = pipe.predict(df_pred)
                     proba = None
@@ -961,7 +1019,7 @@ def main():
                 except Exception as e:
                     st.markdown(f"""
                     <div class="error-box">
-                        <strong>❌ Failed to process uploaded file:</strong> {str(e)}
+                        <strong>❌ Failed to process uploaded file:</strong> {html.escape(str(e))}
                     </div>
                     """, unsafe_allow_html=True)
                     progress_bar.empty()
