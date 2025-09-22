@@ -253,7 +253,15 @@ def train_and_evaluate(df: pd.DataFrame, target: str, cfg: TrainConfig) -> Tuple
         except Exception:
             metrics["dropped_classes"] = str(dropped_classes)
 
-    labels = sorted(pd.unique(pd.concat([y_test, y_pred], ignore_index=True)))
+    # Ensure both inputs are pandas objects before concatenation
+    labels = sorted(
+        pd.unique(
+            pd.concat([
+                y_test.reset_index(drop=True) if hasattr(y_test, "reset_index") else pd.Series(y_test),
+                pd.Series(y_pred),
+            ], ignore_index=True)
+        )
+    )
     cm = confusion_matrix(y_test, y_pred, labels=labels)
     cm_df = pd.DataFrame(cm, index=[f"true_{l}" for l in labels], columns=[f"pred_{l}" for l in labels])
 

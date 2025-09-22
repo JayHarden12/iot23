@@ -16,9 +16,25 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     # Basic dtype-based selection
     numeric_cols: List[str] = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
     bool_cols: List[str] = [c for c in X.columns if pd.api.types.is_bool_dtype(X[c])]
-    categorical_cols: List[str] = [
-        c for c in X.columns if c not in numeric_cols and c not in bool_cols and X[c].dtype == object
+
+    # Drop/high-cardinality identifiers that explode one-hot dimensions
+    drop_cols = {"uid", "id.orig_h", "id.resp_h", "id.orig_p", "id.resp_p", "__source_file__"}
+    safe_cats_allowlist = {"proto", "service", "conn_state", "history"}
+    max_unique_for_onehot = 100  # cap categories per column
+
+    obj_cols: List[str] = [
+        c for c in X.columns
+        if c not in numeric_cols and c not in bool_cols and X[c].dtype == object and c not in drop_cols
     ]
+    # Keep only low-cardinality categorical columns or allowlisted protocol fields
+    categorical_cols: List[str] = []
+    for c in obj_cols:
+        try:
+            nunique = X[c].nunique(dropna=True)
+        except Exception:
+            nunique = max_unique_for_onehot + 1
+        if c in safe_cats_allowlist or nunique <= max_unique_for_onehot:
+            categorical_cols.append(c)
 
     # Cast booleans to integers for models that need numeric
     if bool_cols:
@@ -31,7 +47,14 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
         transformers.append(
             (
                 "cat",
-                    OneHotEncoder(handle_unknown="ignore", sparse_output=False, dtype=np.float32),
+                # Limit category explosion and bin infrequent values
+                OneHotEncoder(
+                    handle_unknown="infrequent_if_exist",
+                    min_frequency=5,
+                    max_categories=max_unique_for_onehot,
+                    sparse_output=False,
+                    dtype=np.float32,
+                ),
                 categorical_cols,
             )
         )
@@ -42,4 +65,3 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
 
     pre = ColumnTransformer(transformers=transformers, remainder="drop")
     return pre
-
