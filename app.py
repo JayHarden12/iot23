@@ -1,0 +1,1081 @@
+﻿import os
+from pathlib import Path
+from typing import Dict, Optional
+import time
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from src.iot23.data_loader import list_candidate_tables, load_sample
+from src.iot23.modeling import TrainConfig, train_and_evaluate
+
+# Page configuration
+st.set_page_config(
+    page_title="IoT-23 Botnet Classification",
+    page_icon="🔒",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+        padding: 1rem;
+        background: linear-gradient(90deg, #1f77b4, #ff7f0e);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
+        margin: 0.5rem 0;
+    }
+    
+    .success-box {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    .error-box {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    .info-box {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #f0f2f6;
+        border-radius: 4px 4px 0px 0px;
+        gap: 1px;
+        padding-left: 20px;
+        padding-right: 20px;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #1f77b4;
+        color: white;
+    }
+    
+    .sidebar .sidebar-content {
+        background-color: #f8f9fa;
+    }
+    
+    .stButton > button {
+        width: 100%;
+        background-color: #1f77b4;
+        color: white;
+        border: none;
+        border-radius: 0.5rem;
+        padding: 0.5rem 1rem;
+        font-weight: bold;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton > button:hover {
+        background-color: #0d5aa7;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    
+    .stSelectbox > div > div {
+        background-color: white;
+        border-radius: 0.5rem;
+    }
+    
+    .stSlider > div > div > div > div {
+        background-color: #1f77b4;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+@st.cache_data(show_spinner=False)
+def cached_list_tables(dataset_path: str):
+    return list_candidate_tables(dataset_path)
+
+
+@st.cache_data(show_spinner=True)
+def cached_load_sample(dataset_path: str, max_files: int, rows_per_file: int, preferred_label: Optional[str], include_benign: bool, task: str, restrict_prd_families: bool):
+    return load_sample(
+        dataset_path=dataset_path,
+        max_files=max_files,
+        rows_per_file=rows_per_file,
+        preferred_label=preferred_label,
+        include_benign=include_benign,
+        task=task,
+        restrict_prd_families=restrict_prd_families,
+    )
+
+
+def sidebar():
+    st.sidebar.title("IoT-23 Dataset")
+    default_path = "IoT-23.zip" if Path("IoT-23.zip").exists() else str(Path.cwd())
+    dataset_path = st.sidebar.text_input("Dataset path (zip or folder)", value=default_path)
+
+    task = st.sidebar.radio("Task", options=["Family (multiclass)", "Binary (malicious vs benign)"], index=0)
+    task_key = "family" if task.startswith("Family") else "binary"
+    include_benign = st.sidebar.checkbox("Include benign samples", value=(task_key == "binary"))
+    restrict_prd = st.sidebar.checkbox("Restrict to PRD families (Benign, Mirai, Torii, Kenjiro, Trojan)", value=True)
+
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Sampling (keep moderate to avoid OOM)")
+    max_files = st.sidebar.slider("Max files", min_value=1, max_value=50, value=6, step=1)
+    rows_per_file = st.sidebar.slider("Rows per file", min_value=5000, max_value=200000, value=60000, step=5000)
+
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("Preview files in dataset", expanded=False):
+        if dataset_path:
+            try:
+                files = cached_list_tables(dataset_path)
+                if files:
+                    st.write(f"Found {len(files)} candidate tables; showing first 30:")
+                    st.code("\n".join(map(str, files[:30])), language="text")
+                else:
+                    st.info("No candidate tables found yet. Check the path.")
+            except Exception as e:
+                st.warning(f"Could not list tables: {e}")
+
+    st.sidebar.markdown("---")
+    preferred_label = st.sidebar.text_input("Preferred label column (optional)")
+
+    return dataset_path, task_key, include_benign, max_files, rows_per_file, preferred_label, restrict_prd
+
+
+def main():
+    dataset_path, task_key, include_benign, max_files, rows_per_file, preferred_label, restrict_prd = sidebar()
+
+    # Main header with enhanced styling
+    st.markdown('<h1 class="main-header">🔒 IoT-23 Botnet Classification System</h1>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <p style="font-size: 1.2rem; color: #666;">
+            Advanced Machine Learning Platform for IoT Security Analysis
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tabs = st.tabs(["📊 Data Explorer", "🤖 Model Training", "🔮 Predictions", "📈 Analytics", "ℹ️ About"])
+
+    with tabs[0]:
+        st.markdown("### 📊 Data Explorer")
+        st.markdown("Load and explore the IoT-23 dataset with interactive visualizations")
+        
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            do_load = st.button("🚀 Load Sample Data", type="primary", use_container_width=True)
+        with col_b:
+            st.markdown("""
+            <div class="info-box">
+                <strong>💡 Sampling Strategy:</strong> The system samples rows across multiple files to keep memory usage reasonable. 
+                Increase sampling parameters if you have more RAM available.
+            </div>
+            """, unsafe_allow_html=True)
+
+        if do_load:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                status_text.text("🔍 Scanning dataset...")
+                progress_bar.progress(20)
+                
+                status_text.text("📂 Loading sample data...")
+                progress_bar.progress(50)
+                
+                df, target, loaded = cached_load_sample(dataset_path, max_files, rows_per_file, preferred_label or None, include_benign, task_key, restrict_prd)
+                
+                progress_bar.progress(80)
+                status_text.text("✅ Processing complete!")
+                
+                if df is None or df.empty:
+                    st.markdown("""
+                    <div class="error-box">
+                        <strong>❌ No data loaded.</strong> Please check your dataset path and file types. 
+                        Ensure the path points to a valid IoT-23 dataset.
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="success-box">
+                        <strong>✅ Success!</strong> Loaded <strong>{len(df):,}</strong> rows from <strong>{len(loaded)}</strong> files
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.session_state["df"] = df
+                    st.session_state["target"] = target
+                    st.session_state["loaded_files"] = loaded
+                    
+                    progress_bar.progress(100)
+                    status_text.text("🎉 Data loading complete!")
+                    time.sleep(1)
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+            except Exception as e:
+                st.markdown(f"""
+                <div class="error-box">
+                    <strong>❌ Error loading data:</strong> {str(e)}
+                </div>
+                """, unsafe_allow_html=True)
+                progress_bar.empty()
+                status_text.empty()
+
+        df = st.session_state.get("df")
+        target = st.session_state.get("target")
+        loaded = st.session_state.get("loaded_files", [])
+
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            # Data overview section
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("📊 Total Rows", f"{len(df):,}")
+            with col2:
+                st.metric("📁 Files Loaded", len(loaded))
+            with col3:
+                st.metric("🔢 Features", len(df.columns) - 1)
+            with col4:
+                st.metric("🎯 Target Column", target if target else "Not detected")
+            
+            # Data preview
+            st.markdown("### 📋 Data Preview")
+            with st.expander("📁 Loaded Files", expanded=False):
+                if loaded:
+                    for i, file in enumerate(loaded, 1):
+                        st.write(f"{i}. {file}")
+                else:
+                    st.write("No files loaded")
+            
+            # Interactive data table
+            st.dataframe(
+                df.head(100), 
+                use_container_width=True,
+                height=400
+            )
+            
+            # Download option
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Sample Data (CSV)",
+                data=csv,
+                file_name=f"iot23_sample_{len(df)}_rows.csv",
+                mime="text/csv"
+            )
+
+            if target and target in df.columns:
+                st.markdown("### 📊 Class Distribution Analysis")
+                
+                # Enhanced class distribution visualization
+                counts = df[target].value_counts(dropna=False)
+                
+                # Create a more sophisticated visualization
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    # Interactive bar chart
+                    fig = px.bar(
+                        x=counts.index, 
+                        y=counts.values,
+                        title="Class Distribution",
+                        labels={'x': 'Class', 'y': 'Count'},
+                        color=counts.values,
+                        color_continuous_scale='viridis'
+                    )
+                    fig.update_layout(
+                        xaxis_tickangle=-45,
+                        height=400,
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    # Pie chart
+                    fig_pie = px.pie(
+                        values=counts.values,
+                        names=counts.index,
+                        title="Class Proportions"
+                    )
+                    fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                
+                # Class statistics
+                st.markdown("#### 📈 Class Statistics")
+                class_stats = pd.DataFrame({
+                    'Class': counts.index,
+                    'Count': counts.values,
+                    'Percentage': (counts.values / counts.sum() * 100).round(2)
+                })
+                st.dataframe(class_stats, use_container_width=True)
+                
+                # Warnings and recommendations
+                if counts[counts.index.notna()].size < 2:
+                    st.markdown("""
+                    <div class="warning-box">
+                        <strong>⚠️ Warning:</strong> Only one class present. Increase 'Max files' or 'Rows per file', 
+                        or disable PRD family restriction to include more classes.
+                    </div>
+                    """, unsafe_allow_html=True)
+                elif len(counts) > 1 and counts.min() == 1:
+                    st.markdown("""
+                    <div class="warning-box">
+                        <strong>⚠️ Warning:</strong> At least one class has only 1 sample; training will drop it or 
+                        fall back to non-stratified split. Increase sampling for better metrics.
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Data quality metrics
+                st.markdown("#### 🔍 Data Quality Metrics")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    missing_target = df[target].isnull().sum()
+                    st.metric("Missing Target Values", missing_target)
+                with col2:
+                    unique_classes = df[target].nunique()
+                    st.metric("Unique Classes", unique_classes)
+                with col3:
+                    most_common_class = counts.index[0]
+                    most_common_count = counts.iloc[0]
+                    st.metric("Most Common Class", f"{most_common_class} ({most_common_count:,})")
+        else:
+            st.markdown("""
+            <div class="info-box">
+                <strong>ℹ️ No data loaded.</strong> Click the "Load Sample Data" button above to start exploring the IoT-23 dataset.
+            </div>
+            """, unsafe_allow_html=True)
+
+    with tabs[1]:
+        st.markdown("### 🤖 Model Training")
+        st.markdown("Train and evaluate machine learning models for botnet classification")
+        
+        df = st.session_state.get("df")
+        target = st.session_state.get("target")
+
+        if not isinstance(df, pd.DataFrame) or df.empty or not target:
+            st.markdown("""
+            <div class="info-box">
+                <strong>ℹ️ No data available for training.</strong> Please load data first in the Data Explorer tab.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            # Model configuration section
+            st.markdown("#### ⚙️ Model Configuration")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                model_name = st.selectbox(
+                    "🤖 Model Type", 
+                    ["RandomForest", "CNN1D", "LSTM"], 
+                    index=0,
+                    help="Choose the machine learning algorithm"
+                )
+            with col2:
+                test_size = st.slider(
+                    "📊 Test Size", 
+                    0.1, 0.4, 0.2, 0.05,
+                    help="Proportion of data to use for testing"
+                )
+            with col3:
+                random_state = st.number_input(
+                    "🎲 Random Seed", 
+                    min_value=0, max_value=999999, value=42, step=1,
+                    help="For reproducible results"
+                )
+
+            repeats = st.slider("🔄 Training Repeats", 1, 5, 1, 1, help="Number of training runs to average metrics")
+
+            # Hyperparameter configuration
+            st.markdown("#### 🔧 Hyperparameters")
+            
+            if model_name == "RandomForest":
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    n_estimators = st.slider(
+                        "🌳 Number of Trees", 
+                        50, 600, 200, 50,
+                        help="Number of trees in the forest"
+                    )
+                with col2:
+                    max_depth = st.slider(
+                        "📏 Max Depth", 
+                        0, 60, 0, 1,
+                        help="Maximum depth of trees (0 = unlimited)"
+                    )
+                with col3:
+                    min_samples_split = st.slider(
+                        "✂️ Min Samples Split", 
+                        2, 20, 2, 1,
+                        help="Minimum samples required to split a node"
+                    )
+                
+                cfg = TrainConfig(
+                    model_name=model_name,
+                    test_size=float(test_size),
+                    random_state=int(random_state),
+                    n_estimators=int(n_estimators),
+                    max_depth=None if max_depth == 0 else int(max_depth),
+                    min_samples_split=int(min_samples_split),
+                )
+            else:  # CNN1D, LSTM
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    epochs = st.slider(
+                        "🔄 Epochs", 
+                        3, 50, 10, 1,
+                        help="Number of training epochs"
+                    )
+                with col2:
+                    batch_size = st.slider(
+                        "📦 Batch Size", 
+                        32, 1024, 256, 32,
+                        help="Number of samples per batch"
+                    )
+                with col3:
+                    patience = st.slider(
+                        "⏰ Early Stop Patience", 
+                        1, 10, 3, 1,
+                        help="Epochs to wait before stopping"
+                    )
+                
+                cfg = TrainConfig(
+                    model_name=model_name,
+                    test_size=float(test_size),
+                    random_state=int(random_state),
+                    epochs=int(epochs),
+                    batch_size=int(batch_size),
+                    patience=int(patience),
+                )
+
+            # Training button
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                train_clicked = st.button("🚀 Start Training", type="primary", use_container_width=True)
+            
+            if train_clicked:
+                all_metrics = []
+                last = None
+                
+                # Create progress containers
+                progress_container = st.container()
+                status_container = st.container()
+                
+                try:
+                    with progress_container:
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                    
+                    with status_container:
+                        status_text.text("🔄 Initializing training...")
+                        progress_bar.progress(10)
+                        
+                        for i in range(int(repeats)):
+                            status_text.text(f"🔄 Training run {i+1}/{int(repeats)}...")
+                            progress_bar.progress(10 + (i * 70 // int(repeats)))
+                            
+                            cfg_i = cfg
+                            cfg_i.random_state = int(random_state) + i
+                            out = train_and_evaluate(df.copy(), target, cfg_i)
+                            pipe, metrics, cm_df, feat_imp, report_df = out
+                            all_metrics.append(metrics)
+                            last = out
+                        
+                        status_text.text("✅ Training complete! Processing results...")
+                        progress_bar.progress(90)
+                    
+                    if last:
+                        st.session_state["model_pipe"] = last[0]
+                        # Average metrics across repeats
+                        keys = sorted(set(k for m in all_metrics for k in m.keys()))
+                        avg = {k: float(np.mean([m.get(k, np.nan) for m in all_metrics if k in m])) for k in keys}
+                        st.session_state["metrics"] = avg
+                        st.session_state["cm_df"] = last[2]
+                        st.session_state["feat_imp"] = last[3]
+                        st.session_state["report_df"] = last[4]
+                        
+                        progress_bar.progress(100)
+                        status_text.text("🎉 Training completed successfully!")
+                        
+                        st.markdown("""
+                        <div class="success-box">
+                            <strong>✅ Training Complete!</strong> Model has been trained and is ready for predictions.
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        time.sleep(2)
+                        progress_bar.empty()
+                        status_text.empty()
+                        
+                except Exception as e:
+                    st.markdown(f"""
+                    <div class="error-box">
+                        <strong>❌ Training Failed:</strong> {str(e)}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    progress_bar.empty()
+                    status_text.empty()
+
+            pipe = st.session_state.get("model_pipe")
+
+            if pipe is not None:
+                # Results section
+                st.markdown("### 📊 Training Results")
+                
+                metrics = st.session_state.get("metrics")
+                cm_df = st.session_state.get("cm_df")
+                feat_imp = st.session_state.get("feat_imp") or {}
+                report_df = st.session_state.get("report_df")
+
+                if metrics:
+                    # Key metrics display
+                    st.markdown("#### 🎯 Performance Metrics")
+                    
+                    # Primary metrics
+                    col1, col2, col3, col4, col5 = st.columns(5)
+                    with col1:
+                        st.metric(
+                            "🎯 Accuracy", 
+                            f"{metrics.get('accuracy', float('nan')):.3f}",
+                            help="Overall classification accuracy"
+                        )
+                    with col2:
+                        st.metric(
+                            "⚖️ F1 (Macro)", 
+                            f"{metrics.get('f1_macro', float('nan')):.3f}",
+                            help="Macro-averaged F1 score"
+                        )
+                    with col3:
+                        st.metric(
+                            "📊 F1 (Weighted)", 
+                            f"{metrics.get('f1_weighted', float('nan')):.3f}",
+                            help="Weighted F1 score"
+                        )
+                    with col4:
+                        st.metric(
+                            "⚖️ Balanced Acc", 
+                            f"{metrics.get('balanced_accuracy', float('nan')):.3f}",
+                            help="Balanced accuracy score"
+                        )
+                    with col5:
+                        st.metric(
+                            "📈 MCC", 
+                            f"{metrics.get('mcc', float('nan')):.3f}",
+                            help="Matthews Correlation Coefficient"
+                        )
+
+                    # Additional metrics
+                    col6, col7 = st.columns(2)
+                    with col6:
+                        if metrics.get("roc_auc_macro_ovr") is not None:
+                            st.metric(
+                                "📈 ROC-AUC (Macro)", 
+                                f"{metrics['roc_auc_macro_ovr']:.3f}",
+                                help="Macro-averaged ROC-AUC"
+                            )
+                    with col7:
+                        if metrics.get("pr_auc_macro_ovr") is not None:
+                            st.metric(
+                                "📊 PR-AUC (Macro)", 
+                                f"{metrics['pr_auc_macro_ovr']:.3f}",
+                                help="Macro-averaged Precision-Recall AUC"
+                            )
+
+                    # Warnings and info
+                    if metrics.get("dropped_classes"):
+                        st.markdown(f"""
+                        <div class="warning-box">
+                            <strong>⚠️ Dropped Classes:</strong> {metrics['dropped_classes']} (had fewer than 2 samples)
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    if metrics.get("split_strategy") == "random":
+                        st.markdown("""
+                        <div class="warning-box">
+                            <strong>⚠️ Non-stratified Split:</strong> Used random split due to class imbalance. 
+                            Consider increasing sample size or files for better stratification.
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                # Confusion Matrix
+                if cm_df is not None and not cm_df.empty:
+                    st.markdown("#### 🔄 Confusion Matrix")
+                    
+                    # Create interactive heatmap
+                    fig_cm = px.imshow(
+                        cm_df.values,
+                        text_auto=True,
+                        aspect="auto",
+                        title="Confusion Matrix",
+                        labels=dict(x="Predicted", y="Actual"),
+                        x=cm_df.columns,
+                        y=cm_df.index,
+                        color_continuous_scale="Blues"
+                    )
+                    fig_cm.update_layout(height=500)
+                    st.plotly_chart(fig_cm, use_container_width=True)
+                    
+                    # Also show as dataframe
+                    with st.expander("📋 Confusion Matrix (Table)"):
+                        st.dataframe(cm_df, use_container_width=True)
+
+                # Classification Report
+                if report_df is not None and not report_df.empty:
+                    st.markdown("#### 📋 Detailed Classification Report")
+                    
+                    # Create interactive table
+                    fig_report = go.Figure(data=[go.Table(
+                        header=dict(values=list(report_df.columns),
+                                  fill_color='lightblue',
+                                  align='center'),
+                        cells=dict(values=[report_df[col] for col in report_df.columns],
+                                 fill_color='white',
+                                 align='center',
+                                 format=[".3f" if col != 'support' else "" for col in report_df.columns])
+                    )])
+                    fig_report.update_layout(height=400, title="Per-Class Performance Metrics")
+                    st.plotly_chart(fig_report, use_container_width=True)
+                    
+                    # Also show as dataframe
+                    with st.expander("📋 Classification Report (Table)"):
+                        st.dataframe(report_df, use_container_width=True)
+
+                # Feature Importance
+                if feat_imp:
+                    st.markdown("#### 🔍 Feature Importance Analysis")
+                    
+                    # Create feature importance dataframe
+                    fi_df = pd.DataFrame({
+                        "feature": list(feat_imp.keys()), 
+                        "importance": list(feat_imp.values())
+                    })
+                    fi_df = fi_df.sort_values("importance", ascending=False).head(30)
+                    
+                    # Interactive bar chart
+                    fig_fi = px.bar(
+                        fi_df, 
+                        x='importance', 
+                        y='feature',
+                        orientation='h',
+                        title="Top 30 Most Important Features",
+                        labels={'importance': 'Importance Score', 'feature': 'Feature Name'}
+                    )
+                    fig_fi.update_layout(height=600, yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_fi, use_container_width=True)
+                    
+                    # Also show as dataframe
+                    with st.expander("📋 Feature Importance (Table)"):
+                        st.dataframe(fi_df, use_container_width=True)
+
+    with tabs[2]:
+        st.markdown("### 🔮 Predictions")
+        st.markdown("Make predictions on new data using your trained model")
+        
+        pipe = st.session_state.get("model_pipe")
+        if pipe is None:
+            st.markdown("""
+            <div class="info-box">
+                <strong>ℹ️ No trained model available.</strong> Please train a model first in the Model Training tab.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("#### 📁 Upload New Data")
+            uploaded = st.file_uploader(
+                "Choose a CSV/TSV file with the same schema as training data", 
+                type=["csv", "tsv", "log", "txt"],
+                help="Upload a file with the same features as your training data"
+            )
+            
+            if uploaded is not None:
+                try:
+                    # Load and process uploaded data
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    status_text.text("📂 Loading uploaded file...")
+                    progress_bar.progress(25)
+                    
+                    df_pred = pd.read_csv(
+                        uploaded, 
+                        sep=None, 
+                        engine="python", 
+                        comment="#", 
+                        low_memory=False, 
+                        encoding_errors="ignore"
+                    )
+                    
+                    status_text.text("🔍 Processing data...")
+                    progress_bar.progress(50)
+                    
+                    # Make predictions
+                    preds = pipe.predict(df_pred)
+                    proba = None
+                    try:
+                        proba = pipe.predict_proba(df_pred)
+                    except Exception:
+                        pass
+                    
+                    status_text.text("✅ Generating results...")
+                    progress_bar.progress(75)
+                    
+                    # Create results dataframe
+                    out = df_pred.copy()
+                    out["prediction"] = preds
+                    if proba is not None and proba.ndim == 2:
+                        # Add max probability for convenience
+                        out["max_proba"] = np.max(proba, axis=1)
+                        # Add individual class probabilities
+                        classes = getattr(pipe.named_steps.get("clf"), "classes_", None)
+                        if classes is not None:
+                            for i, class_name in enumerate(classes):
+                                out[f"prob_{class_name}"] = proba[:, i]
+                    
+                    status_text.text("🎉 Predictions complete!")
+                    progress_bar.progress(100)
+                    
+                    # Display results
+                    st.markdown("#### 📊 Prediction Results")
+                    
+                    # Summary statistics
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("📊 Total Predictions", len(out))
+                    with col2:
+                        unique_preds = out["prediction"].nunique()
+                        st.metric("🎯 Unique Classes", unique_preds)
+                    with col3:
+                        if "max_proba" in out.columns:
+                            avg_confidence = out["max_proba"].mean()
+                            st.metric("📈 Avg Confidence", f"{avg_confidence:.3f}")
+                    with col4:
+                        most_common = out["prediction"].mode().iloc[0] if len(out) > 0 else "N/A"
+                        st.metric("🏆 Most Common", most_common)
+                    
+                    # Prediction distribution
+                    if len(out) > 0:
+                        st.markdown("#### 📊 Prediction Distribution")
+                        pred_counts = out["prediction"].value_counts()
+                        
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            fig_pred = px.bar(
+                                x=pred_counts.index, 
+                                y=pred_counts.values,
+                                title="Prediction Distribution",
+                                labels={'x': 'Predicted Class', 'y': 'Count'},
+                                color=pred_counts.values,
+                                color_continuous_scale='viridis'
+                            )
+                            st.plotly_chart(fig_pred, use_container_width=True)
+                        
+                        with col2:
+                            fig_pie = px.pie(
+                                values=pred_counts.values,
+                                names=pred_counts.index,
+                                title="Class Proportions"
+                            )
+                            st.plotly_chart(fig_pie, use_container_width=True)
+                    
+                    # Results table
+                    st.markdown("#### 📋 Detailed Results")
+                    st.dataframe(out.head(100), use_container_width=True)
+                    
+                    # Download results
+                    csv = out.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Predictions (CSV)",
+                        data=csv,
+                        file_name=f"predictions_{len(out)}_samples.csv",
+                        mime="text/csv"
+                    )
+                    
+                    time.sleep(1)
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                except Exception as e:
+                    st.markdown(f"""
+                    <div class="error-box">
+                        <strong>❌ Failed to process uploaded file:</strong> {str(e)}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    progress_bar.empty()
+                    status_text.empty()
+
+    with tabs[3]:
+        st.markdown("### 📈 Analytics Dashboard")
+        st.markdown("Advanced analytics and insights from your data and models")
+        
+        df = st.session_state.get("df")
+        target = st.session_state.get("target")
+        metrics = st.session_state.get("metrics")
+        
+        if df is not None and not df.empty and target:
+            # Data analytics
+            st.markdown("#### 📊 Data Analytics")
+            
+            # Feature analysis
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                st.markdown("##### 🔢 Numeric Features Analysis")
+                
+                # Correlation matrix
+                if len(numeric_cols) > 1:
+                    corr_matrix = df[numeric_cols].corr()
+                    fig_corr = px.imshow(
+                        corr_matrix,
+                        title="Feature Correlation Matrix",
+                        color_continuous_scale="RdBu",
+                        aspect="auto"
+                    )
+                    st.plotly_chart(fig_corr, use_container_width=True)
+                
+                # Feature distributions
+                st.markdown("##### 📈 Feature Distributions")
+                selected_features = st.multiselect(
+                    "Select features to analyze:",
+                    numeric_cols,
+                    default=numeric_cols[:5] if len(numeric_cols) >= 5 else numeric_cols
+                )
+                
+                if selected_features:
+                    for feature in selected_features:
+                        fig_dist = px.histogram(
+                            df, 
+                            x=feature, 
+                            color=target if target in df.columns else None,
+                            title=f"Distribution of {feature}",
+                            nbins=50
+                        )
+                        st.plotly_chart(fig_dist, use_container_width=True)
+            
+            # Class analysis
+            if target in df.columns:
+                st.markdown("##### 🎯 Class Analysis")
+                
+                # Class distribution over time (if there's a time column)
+                time_cols = [col for col in df.columns if any(word in col.lower() for word in ['time', 'date', 'timestamp'])]
+                if time_cols:
+                    time_col = time_cols[0]
+                    try:
+                        df_time = df.copy()
+                        df_time[time_col] = pd.to_datetime(df_time[time_col], errors='coerce')
+                        df_time = df_time.dropna(subset=[time_col])
+                        
+                        if not df_time.empty:
+                            fig_time = px.histogram(
+                                df_time,
+                                x=time_col,
+                                color=target,
+                                title=f"Class Distribution Over {time_col}",
+                                nbins=50
+                            )
+                            st.plotly_chart(fig_time, use_container_width=True)
+                    except:
+                        pass
+                
+                # Class balance analysis
+                class_counts = df[target].value_counts()
+                balance_ratio = class_counts.min() / class_counts.max()
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Class Balance Ratio", f"{balance_ratio:.3f}")
+                with col2:
+                    st.metric("Most Imbalanced Class", f"{class_counts.min()}/{class_counts.max()}")
+                with col3:
+                    st.metric("Total Classes", len(class_counts))
+        
+        # Model analytics
+        if metrics:
+            st.markdown("#### 🤖 Model Analytics")
+            
+            # Performance comparison
+            st.markdown("##### 📊 Performance Metrics Comparison")
+            
+            metric_names = ['accuracy', 'f1_macro', 'f1_weighted', 'balanced_accuracy', 'mcc']
+            metric_values = [metrics.get(name, 0) for name in metric_names]
+            
+            fig_metrics = px.bar(
+                x=metric_names,
+                y=metric_values,
+                title="Model Performance Metrics",
+                labels={'x': 'Metric', 'y': 'Score'},
+                color=metric_values,
+                color_continuous_scale='viridis'
+            )
+            fig_metrics.update_layout(height=400)
+            st.plotly_chart(fig_metrics, use_container_width=True)
+            
+            # Model recommendations
+            st.markdown("##### 💡 Model Recommendations")
+            
+            if metrics.get('accuracy', 0) < 0.8:
+                st.markdown("""
+                <div class="warning-box">
+                    <strong>⚠️ Low Accuracy:</strong> Consider increasing training data, tuning hyperparameters, or trying different models.
+                </div>
+                """, unsafe_allow_html=True)
+            
+            if metrics.get('f1_macro', 0) < metrics.get('f1_weighted', 0) * 0.9:
+                st.markdown("""
+                <div class="warning-box">
+                    <strong>⚠️ Class Imbalance:</strong> Significant difference between macro and weighted F1 scores indicates class imbalance.
+                </div>
+                """, unsafe_allow_html=True)
+            
+            if metrics.get('balanced_accuracy', 0) < metrics.get('accuracy', 0) * 0.9:
+                st.markdown("""
+                <div class="warning-box">
+                    <strong>⚠️ Imbalanced Performance:</strong> Balanced accuracy is significantly lower than accuracy.
+                </div>
+                """, unsafe_allow_html=True)
+        
+        if df is None or df.empty:
+            st.markdown("""
+            <div class="info-box">
+                <strong>ℹ️ No data available for analytics.</strong> Please load data first in the Data Explorer tab.
+            </div>
+            """, unsafe_allow_html=True)
+
+    with tabs[4]:
+        st.markdown("### ℹ️ About This Application")
+        
+        st.markdown("""
+        <div class="info-box">
+            <h4>🔒 IoT-23 Botnet Classification System</h4>
+            <p>This advanced machine learning platform helps explore the IoT-23 dataset and train state-of-the-art models for IoT botnet family classification and binary malware detection.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Features
+        st.markdown("#### ✨ Key Features")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **📊 Data Explorer**
+            - Interactive data visualization
+            - Class distribution analysis
+            - Data quality metrics
+            - Sample data download
+            
+            **🤖 Model Training**
+            - Multiple ML algorithms
+            - Hyperparameter tuning
+            - Cross-validation
+            - Performance metrics
+            """)
+        
+        with col2:
+            st.markdown("""
+            **🔮 Predictions**
+            - Upload new data
+            - Real-time predictions
+            - Confidence scores
+            - Results download
+            
+            **📈 Analytics**
+            - Feature analysis
+            - Model insights
+            - Performance recommendations
+            - Interactive visualizations
+            """)
+        
+        # Technical details
+        st.markdown("#### 🔧 Technical Details")
+        
+        st.markdown("""
+        **Supported Models:**
+        - Random Forest Classifier
+        - 1D Convolutional Neural Network (CNN)
+        - Long Short-Term Memory (LSTM)
+        
+        **Supported Tasks:**
+        - Botnet Family Classification (Multiclass)
+        - Malicious vs Benign Detection (Binary)
+        
+        **Performance Metrics:**
+        - Accuracy, Precision, Recall, F1-Score
+        - Balanced Accuracy, Matthews Correlation Coefficient
+        - ROC-AUC, PR-AUC
+        - Confusion Matrix, Classification Report
+        """)
+        
+        # Project structure
+        st.markdown("#### 📁 Project Structure")
+        st.code("""
+iot23-classification/
+├── app.py                    # Main Streamlit application
+├── requirements.txt          # Python dependencies
+├── README.md                # Project documentation
+├── IoT-23.zip              # IoT-23 dataset (9GB)
+└── src/
+    └── iot23/
+        ├── __init__.py
+        ├── data_loader.py   # Dataset loading and sampling
+        ├── preprocess.py    # Data preprocessing
+        ├── modeling.py      # Model definitions and training
+        └── utils.py         # Utility functions
+        """, language="text")
+        
+        # Usage instructions
+        st.markdown("#### 🚀 Quick Start")
+        st.markdown("""
+        1. **Load Data**: Use the Data Explorer tab to load sample data from the IoT-23 dataset
+        2. **Configure Model**: Choose your model type and hyperparameters in the Model Training tab
+        3. **Train Model**: Start training and monitor progress with real-time updates
+        4. **Make Predictions**: Upload new data and get predictions in the Predictions tab
+        5. **Analyze Results**: Use the Analytics tab to gain insights from your data and models
+        """)
+        
+        # Contact and support
+        st.markdown("#### 📞 Support")
+        st.markdown("""
+        For questions, issues, or contributions, please refer to the project documentation or create an issue in the repository.
+        
+        **Dataset Reference:**
+        - IoT-23 Dataset: https://www.stratosphereips.org/datasets-iot23
+        - Paper: "IoT-23: A labeled dataset with malicious and benign IoT network traffic"
+        """)
+
+
+if __name__ == "__main__":
+    main()
