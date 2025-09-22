@@ -264,22 +264,27 @@ def sidebar():
         expected_sha256 = None
         dest_name = None
 
-    if data_url:
-        st.sidebar.markdown("---")
-        st.sidebar.caption("Remote dataset (from secrets)")
-        dest_file = Path(dest_name or "IoT-23-features-sample.zip")
-        if dest_file.exists():
-            st.sidebar.success(f"Dataset ready: {dest_file.name}")
-            # Auto-use downloaded dataset to avoid confusing defaults on Cloud
-            dataset_path = str(dest_file)
+    # URL-based dataset download (works with or without secrets)
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Remote dataset (URL download)")
+    url_val = st.sidebar.text_input("Dataset URL", value=data_url or "")
+    dest_name_val = st.sidebar.text_input("Save as filename", value=dest_name or "IoT-23-features-sample.zip")
+    sha_val = st.sidebar.text_input("SHA256 (optional)", value=expected_sha256 or "")
+    dest_file = Path(dest_name_val or "IoT-23-features-sample.zip")
+    if dest_file.exists():
+        st.sidebar.success(f"Dataset ready: {dest_file.name}")
+        # Auto-use downloaded dataset to avoid confusing defaults on Cloud
+        dataset_path = str(dest_file)
+    if st.sidebar.button("Download dataset", use_container_width=True):
+        if not url_val:
+            st.sidebar.warning("Please enter a dataset URL.")
         else:
-            if st.sidebar.button("Download dataset from URL", use_container_width=True):
-                try:
-                    out = _download_with_progress(data_url, dest_file, expected_sha256, label="Downloading dataset")
-                    st.sidebar.success(f"Downloaded to {out.name}")
-                    dataset_path = str(out)
-                except Exception as e:
-                    st.sidebar.warning(f"Download failed: {e}")
+            try:
+                out = _download_with_progress(url_val, dest_file, sha_val or None, label="Downloading dataset")
+                st.sidebar.success(f"Downloaded to {out.name}")
+                dataset_path = str(out)
+            except Exception as e:
+                st.sidebar.warning(f"Download failed: {e}")
 
     # Fixed task: Family (multiclass)
     st.sidebar.caption("Task: Family (multiclass)")
