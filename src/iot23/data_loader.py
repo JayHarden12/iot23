@@ -65,14 +65,14 @@ def _read_member_from_zip(zip_path: Path, member: str, nrows: Optional[int]) -> 
                 # Reset for pandas
                 bf.seek(0)
                 # Zeek logs often start with '#fields' comments; tell pandas to ignore
+                engine = "python" if sep is None else "c"
                 df = pd.read_csv(
                     bf,
                     sep=sep if sep else None,
-                    engine="python" if sep is None else "c",
+                    engine=engine,
                     comment="#",
                     na_values=["-", "N/A", "nan", "NaN", "?"],
                     nrows=nrows,
-                    low_memory=False,
                     encoding_errors="ignore",
                 )
                 df = _fix_merged_label_columns(df)
@@ -91,7 +91,6 @@ def _read_file_from_disk(path: Path, nrows: Optional[int]) -> Optional[pd.DataFr
             comment="#",
             na_values=["-", "N/A", "nan", "NaN", "?"],
             nrows=nrows,
-            low_memory=False,
             encoding_errors="ignore",
         )
         df = _fix_merged_label_columns(df)
@@ -229,35 +228,49 @@ def load_sample(
     if target not in df_all.columns:
         raise ValueError(f"Target column '{target}' not found in data")
 
-    # Clean target for task
+    # Clean target for task (with auto-fallback if PRD restriction collapses classes)
     try:
-        if task == "binary":
-            df_all[target] = df_all[target].astype(str)
-            df_all[target] = np.where(df_all[target].str.contains("benign", case=False, na=False), "Benign", "Malicious")
-            if not include_benign:
-                df_all = df_all[df_all[target] != "Benign"]
-        else:
-            # family task: map to PRD families and/or simplify
-            if restrict_prd_families:
-                fam = df_all[target].map(map_to_prd_family)
-                df_all[target] = fam
-                df_all = df_all[df_all[target].isin(PRD_FAMILIES)]
-                if not include_benign:
-                    df_all = df_all[df_all[target] != "Benign"]
-            else:
-                df_all[target] = df_all[target].map(lambda x: simplify_family_value(str(x)))
-                if not include_benign:
-                    df_all = df_all[~df_all[target].str.contains("benign", case=False, na=False)]
+        base = df_all  # keep unmodified base for potential fallback processing
 
-        df_all = df_all.reset_index(drop=True)
-        
+        def _process_family(df: pd.DataFrame, restrict_prd: bool) -> pd.DataFrame:
+            out = df.copy()
+            if restrict_prd:
+                fam = out[target].map(map_to_prd_family)
+                out[target] = fam
+                out = out[out[target].isin(PRD_FAMILIES)]
+                if not include_benign:
+                    out = out[out[target] != "Benign"]
+            else:
+                out[target] = out[target].map(lambda x: simplify_family_value(str(x)))
+                if not include_benign:
+                    out = out[~out[target].str.contains("benign", case=False, na=False)]
+            return out.reset_index(drop=True)
+
+        if task == "binary":
+            df_proc = base.copy()
+            df_proc[target] = df_proc[target].astype(str)
+            df_proc[target] = np.where(df_proc[target].str.contains("benign", case=False, na=False), "Benign", "Malicious")
+            if not include_benign:
+                df_proc = df_proc[df_proc[target] != "Benign"]
+            df_all = df_proc.reset_index(drop=True)
+        else:
+            # Try PRD restriction first
+            df_proc = _process_family(base, restrict_prd=True) if restrict_prd_families else _process_family(base, restrict_prd=False)
+
+            # Auto-fallback to non-PRD if single-class or empty and PRD was requested
+            if restrict_prd_families and (df_proc.empty or (target in df_proc.columns and df_proc[target].nunique() < 2)):
+                df_fb = _process_family(base, restrict_prd=False)
+                if not df_fb.empty and df_fb[target].nunique() >= 2:
+                    df_proc = df_fb
+            df_all = df_proc
+
         # Final validation
         if df_all.empty:
             raise ValueError("No data remaining after filtering. Try adjusting include_benign or restrict_prd_families settings.")
-        
+
         if target in df_all.columns and df_all[target].nunique() < 2:
             raise ValueError(f"Only one class found in target column '{target}'. Try increasing sample size or adjusting filters.")
-            
+
     except Exception as e:
         raise ValueError(f"Failed to process target column: {str(e)}")
 

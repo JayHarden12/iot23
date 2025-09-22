@@ -225,7 +225,14 @@ def train_and_evaluate(df: pd.DataFrame, target: str, cfg: TrainConfig) -> Tuple
             raise ValueError(f"Failed to split data: {str(e)}")
 
     try:
-        pre = build_preprocessor(X_train.copy())
+        X_train_copy = X_train.copy()
+        pre = build_preprocessor(X_train_copy)
+        # Persist input schema on the preprocessor for use at prediction time
+        try:
+            pre.input_columns_ = list(X_train_copy.columns)  # type: ignore[attr-defined]
+            pre.input_dtypes_ = {c: str(dt) for c, dt in X_train_copy.dtypes.items()}  # type: ignore[attr-defined]
+        except Exception:
+            pass
         pipe = build_model(cfg)
         pipe.set_params(pre=pre)
     except Exception as e:
@@ -237,15 +244,48 @@ def train_and_evaluate(df: pd.DataFrame, target: str, cfg: TrainConfig) -> Tuple
     except Exception as e:
         raise ValueError(f"Model training failed: {str(e)}")
 
-    metrics: Dict[str, float] = {
-        "accuracy": accuracy_score(y_test, y_pred),
-        "balanced_accuracy": balanced_accuracy_score(y_test, y_pred),
-        "precision_weighted": precision_score(y_test, y_pred, average="weighted", zero_division=0),
-        "recall_weighted": recall_score(y_test, y_pred, average="weighted", zero_division=0),
-        "f1_weighted": f1_score(y_test, y_pred, average="weighted", zero_division=0),
-        "f1_macro": f1_score(y_test, y_pred, average="macro", zero_division=0),
-        "mcc": matthews_corrcoef(y_test, y_pred),
-    }
+    # Encode labels to numeric for robust metric computations
+    try:
+        y_true_arr = np.asarray(y_test)
+        y_pred_arr = np.asarray(y_pred)
+        y_true_str = y_true_arr.astype(str)
+        y_pred_str = y_pred_arr.astype(str)
+        le_eval = LabelEncoder().fit(np.concatenate([y_true_str, y_pred_str]))
+        y_true_num = le_eval.transform(y_true_str)
+        y_pred_num = le_eval.transform(y_pred_str)
+    except Exception:
+        le_eval = None
+        y_true_num, y_pred_num = y_test, y_pred
+
+    metrics: Dict[str, float] = {}
+    try:
+        metrics["accuracy"] = accuracy_score(y_true_num, y_pred_num)
+    except Exception:
+        pass
+    try:
+        metrics["balanced_accuracy"] = balanced_accuracy_score(y_true_num, y_pred_num)
+    except Exception:
+        pass
+    try:
+        metrics["precision_weighted"] = precision_score(y_true_num, y_pred_num, average="weighted", zero_division=0)
+    except Exception:
+        pass
+    try:
+        metrics["recall_weighted"] = recall_score(y_true_num, y_pred_num, average="weighted", zero_division=0)
+    except Exception:
+        pass
+    try:
+        metrics["f1_weighted"] = f1_score(y_true_num, y_pred_num, average="weighted", zero_division=0)
+    except Exception:
+        pass
+    try:
+        metrics["f1_macro"] = f1_score(y_true_num, y_pred_num, average="macro", zero_division=0)
+    except Exception:
+        pass
+    try:
+        metrics["mcc"] = matthews_corrcoef(y_true_num, y_pred_num)
+    except Exception:
+        pass
     metrics["split_strategy"] = split_strategy
     if dropped_classes:
         try:
@@ -253,34 +293,41 @@ def train_and_evaluate(df: pd.DataFrame, target: str, cfg: TrainConfig) -> Tuple
         except Exception:
             metrics["dropped_classes"] = str(dropped_classes)
 
-    # Ensure both inputs are pandas objects before concatenation
-    labels = sorted(
-        pd.unique(
-            pd.concat([
+    # Confusion matrix with readable labels
+    try:
+        if le_eval is not None:
+            labels = list(le_eval.classes_)
+            cm = confusion_matrix(y_true_num, y_pred_num, labels=list(range(len(labels))))
+            cm_df = pd.DataFrame(cm, index=[f"true_{l}" for l in labels], columns=[f"pred_{l}" for l in labels])
+        else:
+            labels = sorted(pd.unique(pd.concat([
                 y_test.reset_index(drop=True) if hasattr(y_test, "reset_index") else pd.Series(y_test),
                 pd.Series(y_pred),
-            ], ignore_index=True)
-        )
-    )
-    cm = confusion_matrix(y_test, y_pred, labels=labels)
-    cm_df = pd.DataFrame(cm, index=[f"true_{l}" for l in labels], columns=[f"pred_{l}" for l in labels])
+            ], ignore_index=True)))
+            cm = confusion_matrix(y_test, y_pred, labels=labels)
+            cm_df = pd.DataFrame(cm, index=[f"true_{l}" for l in labels], columns=[f"pred_{l}" for l in labels])
+    except Exception:
+        cm_df = pd.DataFrame()
 
     # ROC-AUC / PR-AUC (macro, OVR)
     try:
         # Need probabilities and 2+ classes
         proba = pipe.predict_proba(X_test)
         classes = getattr(pipe.named_steps.get("clf"), "classes_", None)
-        if proba is not None and classes is not None and len(np.unique(y_test)) > 1:
-            y_true_bin = label_binarize(y_test, classes=classes)
+        if proba is not None and classes is not None:
+            classes_str = np.asarray(classes).astype(str)
+            y_true_b = np.asarray(y_test).astype(str)
+            if len(np.unique(y_true_b)) > 1 and proba.shape[1] == len(classes_str):
+                y_true_bin = label_binarize(y_true_b, classes=classes_str)
             # Align proba columns to classes
             # proba shape (n, n_classes) assumed aligned
-            metrics["roc_auc_macro_ovr"] = roc_auc_score(y_true_bin, proba, average="macro", multi_class="ovr")
-            # PR-AUC macro: average of per-class AP
-            ap_per_class = []
-            for i in range(y_true_bin.shape[1]):
-                ap_per_class.append(average_precision_score(y_true_bin[:, i], proba[:, i]))
-            if ap_per_class:
-                metrics["pr_auc_macro_ovr"] = float(np.mean(ap_per_class))
+                metrics["roc_auc_macro_ovr"] = roc_auc_score(y_true_bin, proba, average="macro", multi_class="ovr")
+                # PR-AUC macro: average of per-class AP
+                ap_per_class = []
+                for i in range(y_true_bin.shape[1]):
+                    ap_per_class.append(average_precision_score(y_true_bin[:, i], proba[:, i]))
+                if ap_per_class:
+                    metrics["pr_auc_macro_ovr"] = float(np.mean(ap_per_class))
     except Exception:
         pass
 

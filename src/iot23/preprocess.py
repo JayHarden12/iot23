@@ -14,6 +14,23 @@ def split_features_target(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, 
 
 def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     # Basic dtype-based selection
+    # Drop known label-like columns that can sneak into features (IoT-23 specifics)
+    label_like = {
+        "label",
+        "detailed-label",
+        "detailed_label",
+        "family",
+        "malware",
+        "threat",
+        "class",
+        "tunnel_parents",
+    }
+    # Also drop obvious IDs/high-cardinality fields and helper columns
+    drop_cols = {"uid", "id.orig_h", "id.resp_h", "id.orig_p", "id.resp_p", "__source_file__"}
+    drop_all = {c for c in X.columns if c.lower() in label_like} | drop_cols
+    if drop_all:
+        X = X.drop(columns=[c for c in drop_all if c in X.columns])
+
     numeric_cols: List[str] = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
     bool_cols: List[str] = [c for c in X.columns if pd.api.types.is_bool_dtype(X[c])]
 
